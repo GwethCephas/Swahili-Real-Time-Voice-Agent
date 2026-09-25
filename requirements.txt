@@ -1,0 +1,20 @@
+# Requires Python 3.10+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+websockets==14.1
+
+semantic-kernel==1.21.1
+# Not called directly -- semantic-kernel's AzureChatCompletion connector
+# wraps openai.AsyncAzureOpenAI internally. Reasoning runs through Azure
+# OpenAI, not openai.com.
+openai==1.61.1
+
+azure-cognitiveservices-speech==1.42.0
+# webrtcvad has no prebuilt Windows wheel and needs a C compiler to build from
+# source; webrtcvad-wheels is the same API (still `import webrtcvad`) built
+# from the same source with prebuilt wheels for Windows/macOS/Linux.
+webrtcvad-wheels==2.0.14
+
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+numpy==2.2.1
