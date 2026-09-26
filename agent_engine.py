@@ -54,6 +54,13 @@ class SessionState:
     # kills "ghost audio" left over from a just-cancelled reply.
     epoch: int = 0
 
+    # Turn-ownership token: bumped at the start of every _run_turn call.
+    # Cancelling a task blocked inside asyncio.to_thread (STT/TTS calls)
+    # doesn't take effect until the blocking call returns, which can be
+    # seconds later -- this lets a superseded turn's delayed cleanup detect
+    # that it's stale and avoid clobbering a newer turn's state.
+    turn_id: int = 0
+
     agent_speaking: bool = False
     user_speaking: bool = False
 
@@ -235,17 +242,58 @@ class VoiceAgentEngine:
     async def _handle_utterance(self, session: SessionState, pcm: bytes) -> None:
         try:
             transcript = await asyncio.to_thread(self._azure_transcribe, pcm)
-            if not transcript.strip():
-                return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("STT failed for client_id=%s", session.client_id)
+            await self._emit_text(session, "error", "Samahani, hitilafu imetokea. Tafadhali jaribu tena.")
+            return
 
-            await self._emit_text(session, "transcript", transcript)
-            session.history.add_user_message(transcript)
+        if not transcript.strip():
+            return
 
+        await self._emit_text(session, "transcript", transcript)
+        session.history.add_user_message(transcript)
+        await self._run_turn(session, transcript)
+
+    async def handle_text_input(self, session: SessionState, text: str) -> None:
+        """Entry point for typed (non-voice) input, driving the same turn
+        logic as a spoken utterance. Interrupts any in-flight spoken turn
+        the same way a barge-in would.
+        """
+        text = text.strip()
+        if not text:
+            return
+
+        # A stray in-progress VAD-buffered utterance shouldn't fire its own
+        # turn later and interleave with this one.
+        session.utterance_pcm = bytearray()
+        session.user_speaking = False
+        session.silence_ms = 0
+        session.speech_ms = 0
+
+        if session.agent_speaking or (session.active_turn_task and not session.active_turn_task.done()):
+            self._handle_barge_in(session)
+
+        await self._emit_text(session, "transcript", text)
+        session.history.add_user_message(text)
+        session.active_turn_task = asyncio.create_task(self._run_turn(session, text))
+
+    async def _run_turn(self, session: SessionState, user_text: str) -> None:
+        """Reason over `user_text` (already appended to session.history) via
+        Semantic Kernel, streaming the reply out as clause-buffered TTS audio
+        plus matching agent_reply_chunk text events. Shared by both the
+        voice path (_handle_utterance) and the text path (handle_text_input).
+        """
+        session.turn_id += 1
+        my_turn = session.turn_id
+
+        try:
             session.agent_speaking = True
             await self._emit_text(session, "agent_start", "")
 
             args = KernelArguments(settings=self.request_settings)
-            args["user_input"] = transcript
+            args["user_input"] = user_text
             args["chat_history"] = session.history
 
             buffer = ""
@@ -266,9 +314,11 @@ class VoiceAgentEngine:
                 clause, buffer = self._split_clause(buffer)
                 if clause:
                     await self._synthesize_and_stream(session, clause)
+                    await self._emit_reply_chunk(session, my_turn, clause)
 
             if buffer.strip():
                 await self._synthesize_and_stream(session, buffer)
+                await self._emit_reply_chunk(session, my_turn, buffer)
 
             if full_reply.strip():
                 session.history.add_assistant_message(full_reply)
@@ -279,15 +329,16 @@ class VoiceAgentEngine:
             logger.exception("Error handling turn for client_id=%s", session.client_id)
             await self._emit_text(session, "error", "Samahani, hitilafu imetokea. Tafadhali jaribu tena.")
         finally:
-            session.agent_speaking = False
-            session.active_synthesizer = None
-            # Not awaited: on the cancellation path (barge-in), an `await`
-            # here would immediately re-raise CancelledError and the
-            # agent_end notice would never actually go out.
-            try:
-                session.outbound_queue.put_nowait(("text", None, json.dumps({"type": "agent_end", "text": ""})))
-            except asyncio.QueueFull:
-                pass
+            if session.turn_id == my_turn:
+                session.agent_speaking = False
+                session.active_synthesizer = None
+                # Not awaited: on the cancellation path (barge-in), an `await`
+                # here would immediately re-raise CancelledError and the
+                # agent_end notice would never actually go out.
+                try:
+                    session.outbound_queue.put_nowait(("text", None, json.dumps({"type": "agent_end", "text": ""})))
+                except asyncio.QueueFull:
+                    pass
 
     def _split_clause(self, buffer: str) -> tuple[str | None, str]:
         """Pull one clause off the front of `buffer` once a terminator is hit
@@ -301,6 +352,13 @@ class VoiceAgentEngine:
 
     async def _emit_text(self, session: SessionState, msg_type: str, text: str) -> None:
         payload = json.dumps({"type": msg_type, "text": text})
+        await session.outbound_queue.put(("text", None, payload))
+
+    async def _emit_reply_chunk(self, session: SessionState, turn_id: int, text: str) -> None:
+        # Tagged with turn_id (unlike other status messages) so the client
+        # can discard chunks from a turn that got superseded by a barge-in --
+        # text frames aren't epoch-gated by _sender_loop like audio is.
+        payload = json.dumps({"type": "agent_reply_chunk", "text": text, "turn_id": turn_id})
         await session.outbound_queue.put(("text", None, payload))
 
     # ------------------------------------------------------------------ #

@@ -2,11 +2,15 @@
 
 Audio contract (must match the client -- see config.py):
   - Client -> server: 16kHz, 16-bit mono PCM, 20ms frames, as WebSocket
-    BINARY frames. WebSocket TEXT frames are reserved for JSON control
-    messages, e.g. {"type": "end"}.
+    BINARY frames. WebSocket TEXT frames carry JSON control messages:
+    {"type": "start"}, {"type": "end"} (both no-ops -- VAD auto-detects
+    utterance boundaries), or {"type": "text_input", "text": "..."} for
+    typed (non-voice) input.
   - Server -> client: Azure-synthesized 16kHz, 16-bit mono PCM, as WebSocket
     BINARY frames (chunked as produced). JSON TEXT frames carry status:
     {"type": "transcript", "text": "..."}, {"type": "agent_start"},
+    {"type": "agent_reply_chunk", "text": "...", "turn_id": N} (the
+    assistant's reply text, in sync with each synthesized clause),
     {"type": "agent_end"}, {"type": "barge_in"}, {"type": "error", ...}.
 """
 from __future__ import annotations
@@ -14,8 +18,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 
 from agent_engine import SessionState, VoiceAgentEngine
 from config import settings
@@ -65,7 +71,7 @@ async def swahili_voice_ws(websocket: WebSocket, client_id: str) -> None:
 
             control_text = message.get("text")
             if control_text is not None:
-                _handle_control_message(session, control_text)
+                await _handle_control_message(session, control_text)
 
     except WebSocketDisconnect:
         pass
@@ -96,7 +102,7 @@ async def _sender_loop(websocket: WebSocket, session: SessionState) -> None:
         logger.exception("Sender loop failed for client_id=%s", session.client_id)
 
 
-def _handle_control_message(session: SessionState, raw: str) -> None:
+async def _handle_control_message(session: SessionState, raw: str) -> None:
     try:
         message = json.loads(raw)
     except json.JSONDecodeError:
@@ -111,5 +117,12 @@ def _handle_control_message(session: SessionState, raw: str) -> None:
         # this is a hook for push-to-talk style clients that want to force
         # it, left as a no-op here since it's outside the requested scope.
         logger.debug("Client %s signalled stream end", session.client_id)
+    elif msg_type == "text_input":
+        assert engine is not None
+        await engine.handle_text_input(session, message.get("text", ""))
     else:
         logger.debug("Unhandled control message type '%s' from %s", msg_type, session.client_id)
+
+
+STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

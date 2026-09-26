@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="sw">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Swahili Voice Agent</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Msaidizi wa Sauti (Swahili)</h1>
+      <div id="status" class="status status-idle">Not connected</div>
+    </header>
+
+    <div id="log" class="log"></div>
+
+    <div id="error-banner" class="error-banner hidden"></div>
+
+    <footer>
+      <button id="start-btn" class="btn btn-primary">Start Session</button>
+      <button id="mic-btn" class="btn btn-mic" disabled>🎤 Start Mic</button>
+      <form id="text-form" class="text-form">
+        <input id="text-input" type="text" placeholder="Andika ujumbe..." disabled autocomplete="off" />
+        <button id="send-btn" class="btn" type="submit" disabled>Send</button>
+      </form>
+    </footer>
+    <p class="hint">Tip: use headphones while testing — without them the mic can pick up the agent's own voice and interrupt it.</p>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
